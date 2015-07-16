@@ -54,6 +54,13 @@ namespace raspicam {
         return _impl->startCapture();
     }
 
+    bool RaspiCam::startPreview() {
+        return _impl->startPreview();
+    }
+    void RaspiCam::stopPreview() {
+        return _impl->stopPreview();
+    }
+
     bool RaspiCam::isOpened() const {return _impl->isOpened();}
 
     bool RaspiCam::grab() {

@@ -63,6 +63,9 @@ namespace raspicam {
         /**Makes camera start capturing
          */
         bool startCapture();
+
+        bool startPreview();
+
         /**indicates if camera is open
         */
         bool isOpened() const ;
@@ -170,7 +173,10 @@ namespace raspicam {
         /**Returns the size of the required buffer for the different image types in retrieve
          */
         size_t getImageTypeSize ( RASPICAM_FORMAT type ) const;
-        private:
+
+        void stopPreview();
+
+    private:
         _private::Private_Impl *_impl;
     };
 };

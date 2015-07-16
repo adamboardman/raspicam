@@ -38,7 +38,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef _Private_RaspiCam_IMPL_H
 #define _Private_RaspiCam_IMPL_H
 #include "mmal/mmal.h"
-//#include "mmal_connection.h"
+#include "mmal/util/mmal_connection.h"
 #include <mutex>
 #include <string>
 #include "raspicamtypes.h"
@@ -96,6 +96,8 @@ namespace raspicam {
             {
                 return _isOpened;
             }
+            bool startPreview();
+            void stopPreview();
             /**Starts camera capture
              */
             bool startCapture();
@@ -228,7 +230,7 @@ namespace raspicam {
              */
             size_t getImageTypeSize ( RASPICAM_FORMAT type ) const;
 
-            private:
+        private:
             static void video_buffer_callback ( MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buffer );
             void setDefaultStateParams();
             MMAL_COMPONENT_T *create_camera_component ( RASPIVID_STATE *state );
@@ -259,17 +261,21 @@ namespace raspicam {
             MMAL_PARAM_EXPOSUREMETERINGMODE_T convertMetering ( RASPICAM_METERING metering ) ;
             int convertFormat ( RASPICAM_FORMAT fmt ) ;
 
+            MMAL_STATUS_T setupCameraPort(int cameraPort, const RASPIVID_STATE *state, const MMAL_COMPONENT_T *camera);
 
             //Color conversion
-	    void convertBGR2RGB(unsigned char *  in_bgr,unsigned char *  out_rgb,int size);
+    	    void convertBGR2RGB(unsigned char *  in_bgr,unsigned char *  out_rgb,int size);
             float VIDEO_FRAME_RATE_NUM;
             RASPIVID_STATE State;
             MMAL_STATUS_T status;
             MMAL_PORT_T *camera_video_port;//,*camera_still_port
+            MMAL_PORT_T *camera_preview_port;
+            MMAL_COMPONENT_T *preview_renderer;
+            MMAL_CONNECTION_T *preview_connection;
             PORT_USERDATA callback_data;
             bool _isOpened;
             bool _isCapturing;
-
+            bool _isPreviewing;
 
         };
     };

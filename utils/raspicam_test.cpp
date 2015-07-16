@@ -192,15 +192,23 @@ int main ( int argc,char **argv ) {
     raspicam::RaspiCam Camera;
     processCommandLine ( argc,argv,Camera );
     cout<<"Connecting to camera"<<endl;
-    
-    if ( !Camera.open() ) {
-        cerr<<"Error opening camera"<<endl;
+
+    if ( !Camera.startPreview() ) {
+        cerr<<"Error previewing camera"<<endl;
         return -1;
     }
     cout<<"Connected to camera ="<<Camera.getId() <<" bufs="<<Camera.getImageBufferSize( )<<endl;
     unsigned char *data=new unsigned char[  Camera.getImageBufferSize( )];
     Timer timer;
 
+    sleep(3);
+
+    Camera.stopPreview();
+
+    if ( !Camera.open() ) {
+        cerr<<"Error opening camera"<<endl;
+        return -1;
+    }
 
     cout<<"Capturing...."<<endl;
     size_t i=0;

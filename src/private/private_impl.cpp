@@ -44,6 +44,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 using namespace std;
 namespace raspicam {
     namespace _private{
+#define MMAL_CAMERA_PREVIEW_PORT 0
 #define MMAL_CAMERA_VIDEO_PORT 1
 #define MMAL_CAMERA_CAPTURE_PORT 2
 #define VIDEO_FRAME_RATE_DEN 1
@@ -97,16 +98,12 @@ namespace raspicam {
         }
         bool  Private_Impl::open ( bool StartCapture ) {
             if ( _isOpened ) return false; //already opened
-// create camera
+            // create camera
             if ( ! create_camera_component ( &State ) ) {
                 cerr<<__func__<<" Failed to create camera component"<<__FILE__<<" "<<__LINE__<<endl;
                 return false;
             }
             commitParameters();
-            camera_video_port   = State.camera_component->output[MMAL_CAMERA_VIDEO_PORT];
-            callback_data.pstate = &State;
-            // assign data to use for callback
-            camera_video_port->userdata = ( struct MMAL_PORT_USERDATA_T * ) &callback_data;
 
             _isOpened=true;
             if ( StartCapture ) return startCapture();
@@ -117,8 +114,37 @@ namespace raspicam {
         bool Private_Impl::startCapture() {
             if ( !_isOpened ) {
                 cerr<<__FILE__<<":"<<__LINE__<<":"<<__func__<<" not opened."<<endl;
-                return false; //already opened
+                return false; //not opened
             }
+
+            camera_video_port   = State.camera_component->output[MMAL_CAMERA_VIDEO_PORT];
+
+            // PR : plug the callback to the video port
+            status = mmal_port_enable ( camera_video_port,video_buffer_callback );
+            if ( status ) {
+                cerr<< ( "camera video callback2 error" );
+                return 0;
+            }
+
+            // Ensure there are enough buffers to avoid dropping frames
+            if ( camera_video_port->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM )
+                camera_video_port->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+
+
+            //PR : create pool of message on video port
+            MMAL_POOL_T *pool;
+            camera_video_port->buffer_size = camera_video_port->buffer_size_recommended;
+            camera_video_port->buffer_num = camera_video_port->buffer_num_recommended;
+            pool = mmal_port_pool_create ( camera_video_port, camera_video_port->buffer_num, camera_video_port->buffer_size );
+            if ( !pool ) {
+                cerr<< ( "Failed to create buffer header pool for video output port" );
+            }
+            State.video_pool = pool;
+
+
+            callback_data.pstate = &State;
+            // assign data to use for callback
+            camera_video_port->userdata = ( struct MMAL_PORT_USERDATA_T * ) &callback_data;
 
             // start capture
             if ( mmal_port_parameter_set_boolean ( camera_video_port, MMAL_PARAMETER_CAPTURE, 1 ) != MMAL_SUCCESS ) {
@@ -140,6 +166,80 @@ namespace raspicam {
             }
             _isCapturing=true;
             return true;
+        }
+
+        bool Private_Impl::startPreview() {
+            // create camera
+            if (!_isOpened && !create_camera_component ( &State ) ) {
+                cerr<<__func__<<" Failed to create camera component"<<__FILE__<<" "<<__LINE__<<endl;
+                return false;
+            }
+            commitParameters();
+            camera_preview_port = State.camera_component->output[MMAL_CAMERA_PREVIEW_PORT];
+
+            MMAL_ES_FORMAT_T *format = camera_preview_port->format;
+            format->es->video.width = VCOS_ALIGN_UP(State.width, 32);
+            format->es->video.height = VCOS_ALIGN_UP(State.height, 16);
+            format->es->video.crop.x = 0;
+            format->es->video.crop.y = 0;
+            format->es->video.crop.width = State.width;
+            format->es->video.crop.height = State.height;
+
+            status = mmal_port_format_commit ( camera_preview_port );
+            if ( status ) {
+                cerr<< ( "preview format couldn't be set" );
+                return 0;
+            }
+
+            status = mmal_component_create(MMAL_COMPONENT_DEFAULT_VIDEO_RENDERER, &preview_renderer);
+
+            MMAL_DISPLAYREGION_T *region = new MMAL_DISPLAYREGION_T();
+            region->fullscreen = true;
+            region->mode = MMAL_DISPLAY_MODE_FILL;
+            region->set = MMAL_DISPLAY_SET_FULLSCREEN | MMAL_DISPLAY_SET_MODE;
+
+            status = mmal_util_set_display_region(preview_renderer->input[0], region);
+            if ( status ) {
+                cerr<< ( "renderer component couldn't set region" );
+                mmal_component_destroy (preview_renderer);
+                return 0;
+            }
+
+            /* Enable component */
+            status = mmal_component_enable (preview_renderer);
+
+            if ( status ) {
+                cerr<< ( "renderer component couldn't be enabled" );
+                mmal_component_destroy (preview_renderer);
+                return 0;
+            }
+
+            MMAL_STATUS_T status =  mmal_connection_create ( &preview_connection, preview_renderer->input[0], camera_preview_port, MMAL_CONNECTION_FLAG_TUNNELLING | MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT );
+            if ( status == MMAL_SUCCESS ) {
+                status =  mmal_connection_enable (preview_connection);
+                if ( status != MMAL_SUCCESS ) {
+                    cerr << ("port connection couldn't be enabled");
+                    mmal_connection_destroy(preview_connection);
+                    mmal_component_destroy(preview_renderer);
+                    return 0;
+                }
+            }
+
+            _isPreviewing=true;
+            return true;
+        }
+
+        void Private_Impl::stopPreview() {
+            mmal_connection_disable(preview_connection);
+            mmal_connection_destroy(preview_connection);
+            mmal_component_disable(preview_renderer);
+            mmal_component_destroy(preview_renderer);
+
+            if ( camera_preview_port && camera_preview_port->is_enabled ) {
+                mmal_port_disable ( camera_preview_port );
+                camera_preview_port = NULL;
+            }
+            _isPreviewing=false;
         }
 
         void Private_Impl::release() {
@@ -229,11 +329,9 @@ namespace raspicam {
                 state->camera_component = NULL;
             }
         }
+
         MMAL_COMPONENT_T *Private_Impl::create_camera_component ( RASPIVID_STATE *state ) {
             MMAL_COMPONENT_T *camera = 0;
-            MMAL_ES_FORMAT_T *format;
-            MMAL_PORT_T  *video_port = NULL;
-
             MMAL_STATUS_T status;
             /* Create the component */
             status = mmal_component_create ( MMAL_COMPONENT_DEFAULT_CAMERA, &camera );
@@ -248,8 +346,6 @@ namespace raspicam {
                 mmal_component_destroy ( camera );
                 return 0;
             }
-
-            video_port = camera->output[MMAL_CAMERA_VIDEO_PORT];
 
             //  set up the camera configuration
 
@@ -268,51 +364,26 @@ namespace raspicam {
             cam_config.use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RESET_STC;
             mmal_port_parameter_set ( camera->control, &cam_config.hdr );
 
-            // Set the encode format on the video  port
-
-            format = video_port->format;
-            format->encoding_variant =   convertFormat ( State.captureFtm );
-            format->encoding = convertFormat ( State.captureFtm );
-            format->es->video.width = VCOS_ALIGN_UP(state->width, 32);
-            format->es->video.height = VCOS_ALIGN_UP(state->height, 16);
-            format->es->video.crop.x = 0;
-            format->es->video.crop.y = 0;
-            format->es->video.crop.width = state->width;
-            format->es->video.crop.height = state->height;
-            format->es->video.frame_rate.num = state->framerate;
-            format->es->video.frame_rate.den = VIDEO_FRAME_RATE_DEN;
-
-            status = mmal_port_format_commit ( video_port );
+            status = setupCameraPort(MMAL_CAMERA_PREVIEW_PORT, state, camera);
             if ( status ) {
                 cerr<< ( "camera video format couldn't be set" );
                 mmal_component_destroy ( camera );
                 return 0;
             }
 
-            // PR : plug the callback to the video port
-            status = mmal_port_enable ( video_port,video_buffer_callback );
+            status = setupCameraPort(MMAL_CAMERA_CAPTURE_PORT, state, camera);
             if ( status ) {
-                cerr<< ( "camera video callback2 error" );
+                cerr<< ( "camera capture port couldn't be set" );
                 mmal_component_destroy ( camera );
                 return 0;
             }
 
-            // Ensure there are enough buffers to avoid dropping frames
-            if ( video_port->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM )
-                video_port->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
-
-
-
-            //PR : create pool of message on video port
-            MMAL_POOL_T *pool;
-            video_port->buffer_size = video_port->buffer_size_recommended;
-            video_port->buffer_num = video_port->buffer_num_recommended;
-            pool = mmal_port_pool_create ( video_port, video_port->buffer_num, video_port->buffer_size );
-            if ( !pool ) {
-                cerr<< ( "Failed to create buffer header pool for video output port" );
+            status = setupCameraPort(MMAL_CAMERA_VIDEO_PORT, state, camera);
+            if ( status ) {
+                cerr<< ( "camera video format couldn't be set" );
+                mmal_component_destroy ( camera );
+                return 0;
             }
-            state->video_pool = pool;
-
 
             /* Enable component */
             status = mmal_component_enable ( camera );
@@ -328,6 +399,36 @@ namespace raspicam {
             return camera;
         }
 
+        MMAL_STATUS_T Private_Impl::setupCameraPort(int cameraPort, const RASPIVID_STATE *state, const MMAL_COMPONENT_T *camera) {
+            MMAL_ES_FORMAT_T *format;
+            MMAL_PORT_T  *video_port = NULL;
+            MMAL_STATUS_T status;
+
+            video_port = camera->output[cameraPort];
+            format = video_port->format;
+            if (cameraPort == MMAL_CAMERA_PREVIEW_PORT) {
+                format->encoding = MMAL_ENCODING_OPAQUE;
+                format->encoding_variant = MMAL_ENCODING_I420;
+            } else {
+                format->encoding = convertFormat ( State.captureFtm );;
+                format->encoding_variant = convertFormat ( State.captureFtm );;
+            }
+            format->es->video.width = VCOS_ALIGN_UP(state->width, 32);
+            format->es->video.height = VCOS_ALIGN_UP(state->height, 16);
+            format->es->video.crop.x = 0;
+            format->es->video.crop.y = 0;
+            format->es->video.crop.width = state->width;
+            format->es->video.crop.height = state->height;
+            if (cameraPort == MMAL_CAMERA_CAPTURE_PORT) {
+                format->es->video.frame_rate.num = 0;
+                format->es->video.frame_rate.den = 1;
+            } else {
+                format->es->video.frame_rate.num = state->framerate;
+                format->es->video.frame_rate.den = VIDEO_FRAME_RATE_DEN;
+            }
+            status = mmal_port_format_commit ( video_port );
+            return status;
+        }
 
         void Private_Impl::commitBrightness() {
             mmal_port_parameter_set_rational ( State.camera_component->control, MMAL_PARAMETER_BRIGHTNESS, ( MMAL_RATIONAL_T ) {
